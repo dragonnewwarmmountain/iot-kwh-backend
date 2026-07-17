@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+paho-mqtt
+pydantic
+pydantic-settings
+sqlalchemy
+passlib[argon2]
+python-jose[cryptography]
+sse-starlette
+watchfiles
