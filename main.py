@@ -31,9 +31,13 @@ MQTT_PASS = "Kelompok7_IoT123!"
 MQTT_CLIENT_ID = "fastapi_backend_01" 
 DEVICE_ID = "esp32-01"
 
-# These are the crucial lines that went missing!
+# Legacy Topics
 TOPIC_TELEMETRY = "sensor/kwh/data"
 TOPIC_COMMAND = "actuator/relay/command"
+
+# New Advanced Topics
+TOPIC_ACTUATOR_COMMAND = "actuator/command"
+TOPIC_CONFIG = "actuator/config/threshold"
 
 # Global memory state to hold the latest reading for SSE transmission
 # We attach this directly to the app state so it is accessible across threads
@@ -111,7 +115,7 @@ try:
 except Exception as e:
     print(f"[MQTT] Connection failed: {e}")
 
-# --- 4. API Endpoints ---
+# --- 4. API Endpoints (Legacy) ---
 class RelayCommand(BaseModel):
     action: str
     value: str
@@ -163,3 +167,50 @@ async def sse_generator():
 async def telemetry_stream(request: Request):
     print("[SSE] Client connected to live telemetry stream.")
     return EventSourceResponse(sse_generator())
+
+# --- 6. API Endpoints (New Advanced Architecture) ---
+class ActuatorCommand(BaseModel):
+    target: str  # e.g., "led" or "buzzer"
+    action: str  # e.g., "ON" or "OFF"
+
+class ThresholdConfig(BaseModel):
+    high_threshold: float
+    low_threshold: float
+
+@app.post("/api/v2/devices/command")
+async def control_actuator_json(command: ActuatorCommand):
+    try:
+        # Construct the JSON payload for the ESP32
+        payload = {
+            "target": command.target.lower(),
+            "action": command.action.upper()
+        }
+        
+        # Publish to the new command topic
+        mqtt_client.publish(TOPIC_ACTUATOR_COMMAND, json.dumps(payload))
+        
+        return {
+            "status": "success", 
+            "message": f"Command '{command.action}' dispatched to {command.target}."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/devices/config")
+async def update_threshold(config: ThresholdConfig):
+    try:
+        # Construct the JSON payload matching the C++ firmware expectations
+        payload = {
+            "high": config.high_threshold,
+            "low": config.low_threshold
+        }
+        
+        # Publish to the dedicated configuration topic
+        mqtt_client.publish(TOPIC_CONFIG, json.dumps(payload))
+        
+        return {
+            "status": "success", 
+            "message": f"Thresholds updated: High={config.high_threshold}W, Low={config.low_threshold}W"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
