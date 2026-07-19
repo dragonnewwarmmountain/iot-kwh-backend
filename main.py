@@ -225,26 +225,28 @@ async def delete_user(username: str):
 @app.get("/api/v1/admin/usage")
 async def get_energy_analytics():
     conn = sqlite3.connect('telemetry.db')
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM system_logs")
     total_logs = cursor.fetchone()[0]
+
+    # Mengambil hanya pengguna non-admin yang masih aktif di database
+    # Laporan ini otomatis mengikuti data pengguna riil: akun admin dikecualikan,
+    # dan pengguna yang sudah dihapus tidak akan muncul lagi di sini.
+    cursor.execute("SELECT username FROM users WHERE role != 'admin' ORDER BY id ASC")
+    active_users = cursor.fetchall()
     conn.close()
-    
-    # Menyajikan data fiktif berbasis jumlah log aktual sebagai estimasi komputasi
-    return [
-        {
-            "username": "admin", 
-            "nodes": 4, 
-            "avgDaily": f"{(total_logs * 0.05):.2f} kWh",
-            "totalMonthly": f"{(total_logs * 1.5):.2f} kWh"
-        },
-        {
-            "username": "user", 
-            "nodes": 1, 
+
+    usage_list = []
+    for row in active_users:
+        usage_list.append({
+            "username": row["username"],
+            "nodes": 1,
             "avgDaily": f"{(total_logs * 0.01):.2f} kWh",
             "totalMonthly": f"{(total_logs * 0.3):.2f} kWh"
-        }
-    ]
+        })
+
+    return usage_list
 
 # --- 6. API Endpoints (Aktuator & Logs) ---
 class ActuatorCommand(BaseModel):
