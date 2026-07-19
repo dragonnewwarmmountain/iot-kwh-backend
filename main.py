@@ -201,6 +201,27 @@ async def create_new_user(user: NewUser):
     conn.close()
     return {"status": "success", "message": f"Pengguna {user.username} berhasil diregistrasi."}
 
+@app.delete("/api/v1/admin/users/{username}")
+async def delete_user(username: str):
+    # Mencegah penghapusan akun administrator utama (proteksi sisi server)
+    if username == "admin":
+        raise HTTPException(status_code=403, detail="Akun administrator utama tidak dapat dihapus.")
+
+    conn = sqlite3.connect('telemetry.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+    existing = cursor.fetchone()
+
+    if not existing:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Pengguna tidak ditemukan.")
+
+    cursor.execute("DELETE FROM users WHERE username = ?", (username,))
+    conn.commit()
+    conn.close()
+
+    return {"status": "success", "message": f"Pengguna {username} berhasil dihapus."}
+
 @app.get("/api/v1/admin/usage")
 async def get_energy_analytics():
     conn = sqlite3.connect('telemetry.db')
