@@ -1,6 +1,6 @@
 # File: main.py
 # Architecture Layer: The Backend Engine
-# Purpose: Orchestrates MQTT telemetry, SQLite logging, SSE streaming, and RBAC Authentication.
+# Purpose: Orchestrates MQTT telemetry, SQLite logging, SSE streaming (data + alarm), and RBAC Authentication.
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import EventSourceResponse
@@ -38,9 +38,16 @@ TOPIC_TELEMETRY = "sensor/kwh/data"
 TOPIC_COMMAND = "actuator/relay/command"
 TOPIC_ACTUATOR_COMMAND = "actuator/command"
 TOPIC_CONFIG = "actuator/config/threshold"
+TOPIC_ALARM = f"iot/{DEVICE_ID}/alarm"  # Sesuai TOPIC_ALARM di firmware ESP32
 
 # Global memory state for SSE
-app.state.latest_reading = None 
+app.state.latest_reading = None
+app.state.latest_alarm = {
+    "alert": "SAFE",
+    "power": 0.0,
+    "threshold": 30.0,
+    "timestamp": None
+}
 
 # --- 2. SQLite Database Initialisation ---
 def init_db():
@@ -103,37 +110,57 @@ init_db()
 def on_connect(client, userdata, flags, rc):
     print(f"[MQTT] Connected with result code {rc}")
     client.subscribe(TOPIC_TELEMETRY)
+    client.subscribe(TOPIC_ALARM)
+    print(f"[MQTT] Subscribed to: {TOPIC_TELEMETRY} & {TOPIC_ALARM}")
 
 def on_message(client, userdata, msg):
     try:
         payload_str = msg.payload.decode('utf-8')
-        data = json.loads(payload_str)
-        
-        if all(k in data for k in ("voltage", "current", "power")):
-            voltage = float(data["voltage"])
-            current = float(data["current"])
-            power = float(data["power"])
+
+        # --- Pesan Data Sensor (Telemetri) ---
+        if msg.topic == TOPIC_TELEMETRY:
+            data = json.loads(payload_str)
+
+            if all(k in data for k in ("voltage", "current", "power")):
+                voltage = float(data["voltage"])
+                current = float(data["current"])
+                power = float(data["power"])
+                timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                conn = sqlite3.connect('telemetry.db')
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO system_logs (timestamp, voltage, current, power)
+                    VALUES (?, ?, ?, ?)
+                ''', (timestamp_str, voltage, current, power))
+                conn.commit()
+                conn.close()
+
+                app.state.latest_reading = {
+                    "timestamp": timestamp_str,
+                    "voltage": voltage,
+                    "current": current,
+                    "power": power
+                }
+
+                print(f"[MQTT] Data processed: {power} W")
+
+        # --- Pesan Alarm (Notifikasi Bahaya/Aman dari ESP32) ---
+        elif msg.topic == TOPIC_ALARM:
+            alarm_data = json.loads(payload_str)
             timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            conn = sqlite3.connect('telemetry.db')
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO system_logs (timestamp, voltage, current, power)
-                VALUES (?, ?, ?, ?)
-            ''', (timestamp_str, voltage, current, power))
-            conn.commit()
-            conn.close()
-
-            app.state.latest_reading = {
-                "timestamp": timestamp_str,
-                "voltage": voltage,
-                "current": current,
-                "power": power
+            app.state.latest_alarm = {
+                "alert": alarm_data.get("alert", "SAFE"),
+                "power": alarm_data.get("power", 0.0),
+                "threshold": alarm_data.get("threshold", 30.0),
+                "timestamp": timestamp_str
             }
-            
-            print(f"[MQTT] Data processed: {power} W")
+
+            print(f"[MQTT] Alarm status updated: {app.state.latest_alarm['alert']}")
+
     except Exception as e:
-        print(f"[MQTT] Error parsing message: {e}")
+        print(f"[MQTT] Error parsing message on topic '{msg.topic}': {e}")
 
 mqtt_client = mqtt.Client(client_id=MQTT_CLIENT_ID)
 mqtt_client.username_pw_set(MQTT_USER, MQTT_PASS)
@@ -321,15 +348,35 @@ async def get_system_status():
         "broker": MQTT_BROKER
     }
 
+# --- 6.2 System Alarm (Polling Fallback, opsional) ---
+@app.get("/api/v1/system/alarm")
+async def get_current_alarm():
+    # Endpoint polling sebagai cadangan/pelengkap SSE, kalau sewaktu-waktu
+    # frontend butuh cek status alarm tanpa harus membuka koneksi SSE.
+    return app.state.latest_alarm
+
 # --- 7. Server-Sent Events (SSE) Streaming ---
 async def sse_generator():
-    last_sent_data = None
+    last_sent_reading = None
+    last_sent_alarm = None
+
     while True:
+        # 1. Cek pembaruan data telemetri (voltage/current/power)
         if hasattr(app.state, 'latest_reading') and app.state.latest_reading:
             current_reading = app.state.latest_reading
-            if current_reading != last_sent_data:
-                yield f"data: {json.dumps(current_reading)}\n\n"
-                last_sent_data = current_reading
+            if current_reading != last_sent_reading:
+                payload = {"type": "telemetry", **current_reading}
+                yield f"data: {json.dumps(payload)}\n\n"
+                last_sent_reading = current_reading
+
+        # 2. Cek pembaruan status alarm (DANGER/SAFE dari ESP32)
+        if hasattr(app.state, 'latest_alarm') and app.state.latest_alarm:
+            current_alarm = app.state.latest_alarm
+            if current_alarm != last_sent_alarm:
+                payload = {"type": "alarm", **current_alarm}
+                yield f"data: {json.dumps(payload)}\n\n"
+                last_sent_alarm = current_alarm
+
         await asyncio.sleep(0.5) 
 
 @app.get("/api/v1/telemetry/stream")
