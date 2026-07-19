@@ -310,6 +310,17 @@ async def get_historical_logs(limit: int = 20):
     conn.close()
     return [dict(row) for row in rows]
 
+# --- 6.1 System Status (Real MQTT Broker Health Check) ---
+@app.get("/api/v1/system/status")
+async def get_system_status():
+    # Mengecek status koneksi MQTT client secara langsung ke library paho-mqtt,
+    # bukan lagi indikator statis di frontend.
+    is_connected = mqtt_client.is_connected()
+    return {
+        "mqtt_connected": is_connected,
+        "broker": MQTT_BROKER
+    }
+
 # --- 7. Server-Sent Events (SSE) Streaming ---
 async def sse_generator():
     last_sent_data = None
