@@ -64,20 +64,34 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            role TEXT NOT NULL
+            role TEXT NOT NULL,
+            created_at TEXT
         )
     ''')
-    
+
+    # Migrasi ringan: menambahkan kolom created_at jika database lama belum memilikinya
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
+    except sqlite3.OperationalError:
+        pass  # Kolom sudah ada, lewati
+
+    # Mengisi created_at untuk baris lama yang masih kosong (agar tidak NULL)
+    cursor.execute(
+        "UPDATE users SET created_at = ? WHERE created_at IS NULL",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),)
+    )
+
     # Seeding Kredensial Administrator Bawaan (Hanya dieksekusi jika tabel kosong)
     cursor.execute("SELECT COUNT(*) FROM users")
     if cursor.fetchone()[0] == 0:
         default_admin_pw = hashlib.sha256("admin123".encode()).hexdigest()
         default_user_pw = hashlib.sha256("user123".encode()).hexdigest()
-        
-        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", 
-                       ("admin", default_admin_pw, "admin"))
-        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", 
-                       ("user", default_user_pw, "user"))
+        seed_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        cursor.execute("INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+                       ("admin", default_admin_pw, "admin", seed_time))
+        cursor.execute("INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+                       ("user", default_user_pw, "user", seed_time))
         print("[DATABASE] Tabel pengguna dikonfigurasi. Administrator bawaan disuntikkan.")
         
     conn.commit()
@@ -191,8 +205,9 @@ async def create_new_user(user: NewUser):
     
     try:
         pw_hash = hashlib.sha256(user.password.encode()).hexdigest()
-        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", 
-                       (user.username, pw_hash, user.role))
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+                       (user.username, pw_hash, user.role, created_at))
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
@@ -227,25 +242,35 @@ async def get_energy_analytics():
     conn = sqlite3.connect('telemetry.db')
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM system_logs")
-    total_logs = cursor.fetchone()[0]
 
     # Mengambil hanya pengguna non-admin yang masih aktif di database
     # Laporan ini otomatis mengikuti data pengguna riil: akun admin dikecualikan,
     # dan pengguna yang sudah dihapus tidak akan muncul lagi di sini.
-    cursor.execute("SELECT username FROM users WHERE role != 'admin' ORDER BY id ASC")
+    cursor.execute("SELECT username, created_at FROM users WHERE role != 'admin' ORDER BY id ASC")
     active_users = cursor.fetchall()
-    conn.close()
 
     usage_list = []
     for row in active_users:
+        # Hanya menghitung log telemetri yang tercatat SETELAH pengguna ini dibuat.
+        # Dengan begitu, pengguna yang baru saja didaftarkan mulai dari 0 kWh,
+        # bukan mewarisi data historis dari sebelum akun mereka ada.
+        if row["created_at"]:
+            cursor.execute(
+                "SELECT COUNT(*) FROM system_logs WHERE timestamp >= ?",
+                (row["created_at"],)
+            )
+        else:
+            cursor.execute("SELECT COUNT(*) FROM system_logs")
+        logs_since_created = cursor.fetchone()[0]
+
         usage_list.append({
             "username": row["username"],
             "nodes": 1,
-            "avgDaily": f"{(total_logs * 0.01):.2f} kWh",
-            "totalMonthly": f"{(total_logs * 0.3):.2f} kWh"
+            "avgDaily": f"{(logs_since_created * 0.01):.2f} kWh",
+            "totalMonthly": f"{(logs_since_created * 0.3):.2f} kWh"
         })
 
+    conn.close()
     return usage_list
 
 # --- 6. API Endpoints (Aktuator & Logs) ---
